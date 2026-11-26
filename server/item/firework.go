@@ -31,7 +31,10 @@ func (f Firework) Use(tx *world.Tx, user User, ctx *UseContext) bool {
 	tx.PlaySound(pos, sound.FireworkLaunch{})
 	create := tx.World().EntityRegistry().Config().Firework
 	opts := world.EntitySpawnOpts{Position: pos, Rotation: user.Rotation()}
-	tx.AddEntity(create(opts, f, user, 1.15, 0.04, true))
+	rocket := tx.AddEntity(create(opts, f, user, 1.15, 0.04, true))
+	if b, ok := user.(interface{ BoostGliding(rocket world.Entity) }); ok {
+		b.BoostGliding(rocket)
+	}
 
 	ctx.SubtractFromCount(1)
 	return true
@@ -63,23 +66,34 @@ func (f Firework) EncodeNBT() map[string]any {
 
 // DecodeNBT ...
 func (f Firework) DecodeNBT(data map[string]any) any {
+	if data == nil {
+		return f
+	}
 	if fireworks, ok := data["Fireworks"].(map[string]any); ok {
 		if explosions, ok := fireworks["Explosions"].([]any); ok {
-			f.Explosions = make([]FireworkExplosion, len(explosions))
-			for i, explosion := range f.Explosions {
-				f.Explosions[i] = explosion.DecodeNBT(explosions[i].(map[string]any)).(FireworkExplosion)
+			decoded := make([]FireworkExplosion, 0, len(explosions))
+			for _, explosion := range explosions {
+				m, ok := explosion.(map[string]any)
+				if !ok {
+					continue
+				}
+				if explosionValue, ok := (FireworkExplosion{}).DecodeNBT(m).(FireworkExplosion); ok {
+					decoded = append(decoded, explosionValue)
+				}
 			}
+			f.Explosions = decoded
 		}
-		if durationTicks, ok := fireworks["Flight"].(uint8); ok {
+		if durationTicks, ok := fireworkNBTUint8(fireworks["Flight"]); ok {
 			f.Duration = (time.Duration(durationTicks)*time.Millisecond*50 + time.Millisecond*50) * 10
 		}
 	}
 	return f
 }
 
-// RandomisedDuration returns the randomised flight duration of the firework.
+// RandomisedDuration returns the randomised flight duration of the firework: its Duration plus 0-5 and 0-6 whole
+// ticks drawn separately, as vanilla rockets do.
 func (f Firework) RandomisedDuration() time.Duration {
-	return f.Duration + time.Duration(rand.IntN(int(time.Millisecond*600)))
+	return f.Duration + time.Duration(rand.IntN(6)+rand.IntN(7))*time.Second/20
 }
 
 // OffHand ...

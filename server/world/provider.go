@@ -5,7 +5,6 @@ import (
 
 	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/world/chunk"
-	"github.com/df-mc/goleveldb/leveldb"
 	"github.com/google/uuid"
 	"io"
 )
@@ -26,11 +25,20 @@ type Provider interface {
 	SavePlayerSpawnPosition(uuid uuid.UUID, pos cube.Pos) error
 	// LoadColumn reads a world.Column from the DB at a position and dimension
 	// in the DB. If no column at that position exists, errors.Is(err,
-	// leveldb.ErrNotFound) equals true.
+	// ErrColumnNotFound) equals true.
 	LoadColumn(pos ChunkPos, dim Dimension) (*chunk.Column, error)
 	// StoreColumn stores a world.Column at a position and dimension in the DB.
 	// An error is returned if storing was unsuccessful.
 	StoreColumn(pos ChunkPos, dim Dimension, col *chunk.Column) error
+}
+
+// ConcurrentColumnReader is an optional provider capability. Returning true
+// permits LoadColumn to overlap other provider calls. Reads must be thread-safe
+// and return one consistent column even while its keys are being updated.
+// The capability must not change while the provider is in use by a World.
+type ConcurrentColumnReader interface {
+	Provider
+	ConcurrentColumnReads() bool
 }
 
 // Compile time check to make sure NopProvider implements Provider.
@@ -52,7 +60,7 @@ func (n NopProvider) Settings() *Settings {
 }
 func (NopProvider) SaveSettings(*Settings) {}
 func (NopProvider) LoadColumn(ChunkPos, Dimension) (*chunk.Column, error) {
-	return nil, leveldb.ErrNotFound
+	return nil, ErrColumnNotFound
 }
 func (NopProvider) StoreColumn(ChunkPos, Dimension, *chunk.Column) error { return nil }
 func (NopProvider) LoadPlayerSpawnPosition(uuid.UUID) (cube.Pos, bool, error) {
@@ -61,8 +69,7 @@ func (NopProvider) LoadPlayerSpawnPosition(uuid.UUID) (cube.Pos, bool, error) {
 func (NopProvider) SavePlayerSpawnPosition(uuid.UUID, cube.Pos) error { return nil }
 func (NopProvider) Close() error                                      { return nil }
 
-// lockedProvider wraps a Provider, serialising all calls for providers that
-// are not safe for concurrent use.
+// lockedProvider serialises provider calls except explicitly safe column reads.
 type lockedProvider struct {
 	mu sync.Mutex
 	p  Provider
@@ -93,6 +100,9 @@ func (l *lockedProvider) SavePlayerSpawnPosition(id uuid.UUID, pos cube.Pos) err
 }
 
 func (l *lockedProvider) LoadColumn(pos ChunkPos, dim Dimension) (*chunk.Column, error) {
+	if p, ok := l.p.(ConcurrentColumnReader); ok && p.ConcurrentColumnReads() {
+		return p.LoadColumn(pos, dim)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.p.LoadColumn(pos, dim)

@@ -417,6 +417,10 @@ func (e *EntityHandle) encodeNBT() map[string]any {
 
 // EntityData holds data shared by every entity. It is kept in an EntityHandle.
 type EntityData struct {
+	vehicle           *EntityHandle
+	seat              Seat
+	seatIndex         int
+	riders            map[int]*EntityHandle
 	Pos, Vel          mgl64.Vec3
 	Rot               cube.Rotation
 	Name              string
@@ -503,6 +507,7 @@ type EntityRegistryConfig struct {
 	LingeringPotion    func(opts EntitySpawnOpts, t any, owner Entity) *EntityHandle
 	Snowball           func(opts EntitySpawnOpts, owner Entity) *EntityHandle
 	SplashPotion       func(opts EntitySpawnOpts, t any, owner Entity) *EntityHandle
+	WindCharge         func(opts EntitySpawnOpts, owner Entity) *EntityHandle
 	Lightning          func(opts EntitySpawnOpts) *EntityHandle
 }
 

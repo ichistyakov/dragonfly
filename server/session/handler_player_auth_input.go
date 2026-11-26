@@ -6,7 +6,6 @@ import (
 
 	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/world"
-	"github.com/go-gl/mathgl/mgl32"
 	"github.com/go-gl/mathgl/mgl64"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -18,8 +17,19 @@ type PlayerAuthInputHandler struct{}
 // Handle ...
 func (h PlayerAuthInputHandler) Handle(p packet.Packet, s *Session, tx *world.Tx, c Controllable) error {
 	pk := p.(*packet.PlayerAuthInput)
-	if err := h.handleMovement(pk, s, c); err != nil {
-		return err
+	s.inputTick.Store(pk.Tick)
+	if c.Dead() {
+		return nil
+	}
+	riding := tx.HandleRiderInput(c, world.RiderInput{
+		Move: mgl64.Vec2{float64(pk.MoveVector.X()), float64(pk.MoveVector.Y())},
+		Yaw:  float64(pk.Yaw), Pitch: float64(pk.Pitch),
+		Jump: pk.InputData.Load(packet.InputFlagJumping), Sneak: pk.InputData.Load(packet.InputFlagSneaking),
+	})
+	if !riding {
+		if err := h.handleMovement(pk, s, c); err != nil {
+			return err
+		}
 	}
 	return h.handleActions(pk, s, tx, c)
 }
@@ -42,7 +52,7 @@ func (h PlayerAuthInputHandler) handleMovement(pk *packet.PlayerAuthInput, s *Se
 		}
 	}
 
-	pk.Position = pk.Position.Sub(mgl32.Vec3{0, 1.62}) // Sub the base offset of players from the pos.
+	pk.Position = vec64To32(entityBasePosition(c, vec32To64(pk.Position)))
 
 	newPos := vec32To64(pk.Position)
 	deltaPos, deltaYaw, deltaPitch := newPos.Sub(pos), float64(pk.Yaw)-yaw, float64(pk.Pitch)-pitch
@@ -134,7 +144,8 @@ func (h PlayerAuthInputHandler) handleInputFlags(flags protocol.InputFlags, s *S
 	if flags.Load(packet.InputFlagStopGliding) {
 		c.StopGliding()
 	}
-	if flags.Load(packet.InputFlagStartJumping) {
+	_, _, riding := world.Riding(c)
+	if flags.Load(packet.InputFlagStartJumping) && !riding {
 		c.Jump()
 	}
 	if flags.Load(packet.InputFlagStartCrawling) {

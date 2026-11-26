@@ -66,6 +66,7 @@ type playerData struct {
 	usingSince time.Time
 
 	glideTicks   int64
+	glideBoost   int64 // Ticks of firework glide boost left; -1 never ends.
 	fireTicks    int64
 	fallDistance float64
 
@@ -739,7 +740,7 @@ func (p *Player) FinalDamageFrom(dmg float64, src world.DamageSource) float64 {
 func (p *Player) Explode(src world.ExplosionSource, impact float64) {
 	explosionPos := src.Position()
 	diff := p.Position().Sub(explosionPos)
-	p.Hurt(math.Floor((impact*impact+impact)*3.5*src.Size()*2+1), entity.ExplosionDamageSource{Source: src})
+	p.Hurt(block.ExplosionDamage(src.Size(), impact), entity.ExplosionDamageSource{Source: src})
 	p.knockBack(explosionPos, impact, diff[1]/diff.Len()*impact)
 }
 
@@ -902,6 +903,7 @@ func (p *Player) kill(src world.DamageSource) {
 	}
 
 	p.addHealth(-p.MaxHealth())
+	p.tx.Dismount(p)
 
 	keepInv := false
 	p.Handler().HandleDeath(p, src, &keepInv)
@@ -1007,6 +1009,8 @@ func (p *Player) respawn(f func(p *Player)) {
 	p.sendFood()
 	p.Extinguish()
 	p.ResetFallDistance()
+	// The boost stops counting down while dead, so a respawned player starts without one.
+	p.glideBoost = 0
 
 	p.Handler().HandleRespawn(p, &pos, &w)
 
@@ -1227,6 +1231,38 @@ func (p *Player) StartGliding() {
 	}
 	p.gliding = true
 	p.updateState()
+}
+
+// BoostGliding boosts the player for as long as rocket, a firework attached to it, lasts and shows the boost to its
+// viewers. Like the vanilla server, the boost only replaces the current one if it lasts at least as long as what
+// remains of it.
+func (p *Player) BoostGliding(rocket world.Entity) {
+	ent, ok := rocket.(*entity.Ent)
+	if !ok {
+		return
+	}
+	f, ok := ent.Behaviour().(*entity.FireworkBehaviour)
+	if !ok {
+		return
+	}
+	const tick = time.Second / 20
+	ticks := int64(-1)
+	if lifetime := f.ExistenceDuration(); lifetime != 0 {
+		ticks = int64((max(lifetime, 0) + tick - 1) / tick)
+	}
+	if !glideBoostReplaces(p.glideBoost, ticks) {
+		return
+	}
+	p.glideBoost = ticks
+	for _, v := range p.viewers() {
+		v.ViewEntityAction(p, entity.GlideBoostAction{Duration: time.Duration(ticks) * tick})
+	}
+}
+
+// glideBoostReplaces reports whether a glide boost of ticks replaces one with current ticks left, where -1 never
+// ends: only one lasting at least as long does.
+func glideBoostReplaces(current, ticks int64) bool {
+	return ticks == current || current != -1 && (ticks == -1 || current <= ticks)
 }
 
 // Gliding checks if the player is currently gliding.
@@ -1784,7 +1820,7 @@ func (p *Player) UseItemOnBlock(pos cube.Pos, face cube.Face, clickPos mgl64.Vec
 	if act, ok := b.(block.Activatable); ok {
 		// If a player is sneaking, it will not activate the block clicked, unless it is not holding any
 		// items, in which case the block will be activated as usual.
-		if !p.Sneaking() || i.Empty() {
+		if block.CanAttemptActivation(i, p.Sneaking()) {
 			// The block was activated: Blocks such as doors must always have precedence over the item being
 			// used.
 			if useCtx := p.useContext(); act.Activate(pos, face, p.tx, p, useCtx) {
@@ -2015,11 +2051,13 @@ func (p *Player) breakTime(pos cube.Pos) time.Duration {
 // affecting how quickly the player breaks blocks.
 func (p *Player) breakContext() block.BreakContext {
 	_, aquaAffinity := p.Armour().Helmet().Enchantment(enchantment.AquaAffinity)
+	_, _, riding := world.Riding(p)
 	ctx := block.BreakContext{
 		Underwater:   p.insideOfWater(),
 		AquaAffinity: aquaAffinity,
 		Airborne:     !p.OnGround(),
 		Flying:       p.Flying(),
+		Riding:       riding,
 	}
 	if e, ok := p.Effect(effect.Haste); ok {
 		ctx.HasteLevel = e.Level()
@@ -2208,13 +2246,8 @@ func (p *Player) BreakBlock(pos cube.Pos) {
 	}
 
 	p.Exhaust(0.005)
-	// Only blocks that naturally break instantly (zero hardness) cost no durability; a block made to break
-	// within one tick by a fast tool or status effects still consumes durability.
-	if block.BreaksInstantly(b) {
-		return
-	}
-	if durable, ok := held.Item().(item.Durable); ok {
-		p.SetHeldItems(p.damageItem(held, durable.DurabilityInfo().BreakDurability), left)
+	if damage := block.BreakDurability(b, held); damage > 0 {
+		p.SetHeldItems(p.damageItem(held, damage), left)
 	}
 }
 
@@ -2299,8 +2332,9 @@ func (p *Player) Teleport(pos mgl64.Vec3) {
 }
 
 // forceTeleport teleports the player without calling the Handler.
-// It also wakes up the player from sleep.
+// It also dismounts the player and wakes them from sleep.
 func (p *Player) forceTeleport(pos mgl64.Vec3) {
+	p.tx.Dismount(p)
 	p.Wake()
 	p.teleport(pos)
 }
@@ -2319,6 +2353,9 @@ func (p *Player) teleport(pos mgl64.Vec3) {
 // position of the player.
 // Move also rotates the player, adding deltaYaw and deltaPitch to the respective values.
 func (p *Player) Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64) {
+	if _, _, riding := world.Riding(p); riding {
+		return
+	}
 	if p.Dead() || (deltaPos.ApproxEqual(mgl64.Vec3{}) && mgl64.FloatEqual(deltaYaw, 0) && mgl64.FloatEqual(deltaPitch, 0)) {
 		p.onGround = true
 		p.updateFallState(deltaPos.Y())
@@ -2391,6 +2428,9 @@ func (p *Player) Move(deltaPos mgl64.Vec3, deltaYaw, deltaPitch float64) {
 
 // Displace moves the player by a server-authoritative relative delta, clipped against block collision boxes.
 func (p *Player) Displace(deltaPos mgl64.Vec3) {
+	if _, _, riding := world.Riding(p); riding {
+		return
+	}
 	if p.Dead() || deltaPos.ApproxEqual(mgl64.Vec3{}) {
 		return
 	}
@@ -2653,6 +2693,10 @@ func (p *Player) Latency() time.Duration {
 
 // Tick ticks the entity, performing actions such as checking if the player is still breaking a block.
 func (p *Player) Tick(tx *world.Tx, current int64) {
+	_, _, riding := world.Riding(p)
+	if riding {
+		p.ResetFallDistance()
+	}
 	if p.Dead() {
 		return
 	}
@@ -2663,6 +2707,9 @@ func (p *Player) Tick(tx *world.Tx, current int64) {
 		}
 	}
 
+	if p.glideBoost > 0 {
+		p.glideBoost--
+	}
 	if _, ok := p.Armour().Chestplate().Item().(item.Elytra); ok && p.Gliding() {
 		if p.glideTicks += 1; p.glideTicks%20 == 0 {
 			d := p.damageItem(p.Armour().Chestplate(), 1)
@@ -2673,7 +2720,12 @@ func (p *Player) Tick(tx *world.Tx, current int64) {
 		}
 	}
 
-	p.checkBlockCollisions(p.data.Vel)
+	velocity := p.data.Vel
+	if riding {
+		// Vehicle velocity is interpolation data; the seat owns player movement.
+		velocity = mgl64.Vec3{}
+	}
+	p.checkBlockCollisions(velocity)
 	p.onGround = p.checkOnGround(mgl64.Vec3{})
 	p.checkEntitySteppers()
 
@@ -2732,14 +2784,16 @@ func (p *Player) Tick(tx *world.Tx, current int64) {
 	}
 	p.prevWorld = tx.World()
 
-	if p.session() == session.Nop && !p.Immobile() {
-		m := p.mc.TickMovement(p, p.Position(), p.Velocity(), p.Rotation(), p.tx)
-		m.Send()
+	if !riding {
+		if p.session() == session.Nop && !p.Immobile() {
+			m := p.mc.TickMovement(p, p.Position(), p.Velocity(), p.Rotation(), p.tx)
+			m.Send()
 
-		p.data.Vel = m.Velocity()
-		p.Move(m.Position().Sub(p.Position()), 0, 0)
-	} else {
-		p.data.Vel = mgl64.Vec3{}
+			p.data.Vel = m.Velocity()
+			p.Move(m.Position().Sub(p.Position()), 0, 0)
+		} else {
+			p.data.Vel = mgl64.Vec3{}
+		}
 	}
 
 	p.portalTravel.StopPortalContact()
@@ -3292,10 +3346,7 @@ func (p *Player) damageItem(s item.Stack, d int) item.Stack {
 	if p.Handler().HandleItemDamage(ctx, s, &d); ctx.Cancelled() || d <= 0 {
 		return s
 	}
-	if e, ok := s.Enchantment(enchantment.Unbreaking); ok {
-		d = enchantment.Unbreaking.Reduce(s.Item(), e.Level(), d)
-	}
-	if s = s.Damage(d); s.Empty() {
+	if s = enchantment.DamageItem(s, d); s.Empty() {
 		p.tx.PlaySound(p.Position(), sound.ItemBreak{})
 	}
 	return s
@@ -3507,6 +3558,15 @@ func (p *Player) broadcastArmour(_ int, before, after item.Stack) {
 	for _, viewer := range p.viewers() {
 		viewer.ViewEntityArmour(p)
 	}
+}
+
+// ControllingViewer returns the player's session independently of loaded chunks,
+// or nil if the player has no session.
+func (p *Player) ControllingViewer() world.Viewer {
+	if p.s == nil {
+		return nil
+	}
+	return p.s
 }
 
 // viewers returns a list of all viewers of the Player.

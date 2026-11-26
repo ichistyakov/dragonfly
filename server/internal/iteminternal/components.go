@@ -1,9 +1,11 @@
 package iteminternal
 
 import (
+	"math"
+	"strings"
+
 	"github.com/df-mc/dragonfly/server/item"
 	"github.com/df-mc/dragonfly/server/world"
-	"strings"
 )
 
 // Components returns all the components of the given custom item. If the item has no components, a nil map and false
@@ -40,6 +42,23 @@ func Components(it world.CustomItem) map[string]any {
 		builder.AddComponent("minecraft:food", map[string]any{
 			"can_always_eat": x.AlwaysConsumable(),
 		})
+
+		// A56: a custom item may advertise its own use-speed multiplier. Publish it
+		// as the standard component so it travels in the item registry instead of
+		// a mob property. The duration inside this component is in seconds, unlike
+		// the legacy use_duration property above which is in ticks.
+		if m, ok := it.(interface{ MovementModifier() float64 }); ok {
+			modifier := m.MovementModifier()
+			if math.IsNaN(modifier) || modifier < 0 {
+				modifier = 0
+			} else if modifier > 1 {
+				modifier = 1
+			}
+			builder.AddComponent("minecraft:use_modifiers", map[string]any{
+				"use_duration":      x.ConsumeDuration().Seconds(),
+				"movement_modifier": modifier,
+			})
+		}
 
 		if y, ok := it.(item.Drinkable); ok && y.Drinkable() {
 			builder.AddProperty("use_animation", int32(2))

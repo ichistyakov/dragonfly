@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"iter"
@@ -17,8 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/df-mc/dragonfly/server/internal/blockinternal"
-	"github.com/df-mc/dragonfly/server/internal/iteminternal"
+	"github.com/df-mc/dragonfly/server/customentry"
 	"github.com/df-mc/dragonfly/server/internal/sliceutil"
 	_ "github.com/df-mc/dragonfly/server/item" // Imported for maintaining correct initialisation order.
 	"github.com/df-mc/dragonfly/server/player"
@@ -30,7 +28,6 @@ import (
 	"github.com/go-gl/mathgl/mgl64"
 	"github.com/google/uuid"
 	"github.com/sandertv/gophertunnel/minecraft"
-	"github.com/sandertv/gophertunnel/minecraft/nbt"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/login"
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
@@ -403,11 +400,7 @@ func (srv *Server) makeBlockEntries() {
 	}
 
 	for i, b := range custom {
-		name, _ := b.EncodeBlock()
-		srv.customBlocks = append(srv.customBlocks, protocol.BlockEntry{
-			Name:       name,
-			Properties: blockinternal.Components(name, b, 10000+int32(i)),
-		})
+		srv.customBlocks = append(srv.customBlocks, customentry.Block(b, 10000+int32(i)))
 	}
 }
 
@@ -416,23 +409,11 @@ func (srv *Server) makeBlockEntries() {
 // at startup
 func (srv *Server) makeItemComponents() {
 	custom := world.CustomItems()
-	srv.customItems = make([]protocol.ItemEntry, len(custom))
+	srv.customItems = make([]protocol.ItemEntry, 0, len(custom))
 
-	for i, it := range custom {
-		name, _ := it.EncodeItem()
+	for _, it := range custom {
 		rid, _, _ := world.ItemRuntimeID(it)
-		_, isCustomBlock := it.(world.CustomBlock)
-		var entryVersion int32 = protocol.ItemEntryVersionDataDriven
-		if isCustomBlock {
-			entryVersion = protocol.ItemEntryVersionNone
-		}
-		srv.customItems[i] = protocol.ItemEntry{
-			Name:           name,
-			ComponentBased: !isCustomBlock,
-			RuntimeID:      int16(rid),
-			Version:        entryVersion,
-			Data:           iteminternal.Components(it),
-		}
+		srv.customItems = append(srv.customItems, customentry.Item(it, int16(rid)))
 	}
 }
 
@@ -473,7 +454,7 @@ func (srv *Server) finaliseConn(ctx context.Context, conn session.Conn, l Listen
 		d.GameMode = w.DefaultGameMode()
 	}
 
-	data.PlayerPosition = vec64To32(d.Position).Add(mgl32.Vec3{0, 1.62})
+	data.PlayerPosition = vec64To32(d.Position).Add(mgl32.Vec3{0, float32(player.Type.NetworkOffset())})
 	dim, _ := world.DimensionID(w.Dimension())
 	data.Dimension = int32(dim)
 	data.Yaw, data.Pitch = float32(d.Rotation.Yaw()), float32(d.Rotation.Pitch())
@@ -513,7 +494,7 @@ func (srv *Server) defaultGameData() minecraft.GameData {
 
 		PlayerGameMode:    int32(gm),
 		PlayerPermissions: packet.PermissionLevelMember,
-		PlayerPosition:    vec64To32(srv.world.Spawn().Vec3Centre().Add(mgl64.Vec3{0, 1.62})),
+		PlayerPosition:    vec64To32(srv.world.Spawn().Vec3Centre().Add(mgl64.Vec3{0, player.Type.NetworkOffset()})),
 
 		Items:        srv.itemEntries(),
 		CustomBlocks: srv.customBlocks,
@@ -572,13 +553,15 @@ func (srv *Server) createPlayer(id uuid.UUID, conn session.Conn, conf player.Con
 	srv.pwg.Add(1)
 
 	s := session.Config{
-		Log:            srv.conf.Log,
-		MaxChunkRadius: srv.conf.MaxChunkRadius,
-		EmoteChatMuted: srv.conf.MuteEmoteChat,
-		JoinMessage:    srv.conf.JoinMessage,
-		QuitMessage:    srv.conf.QuitMessage,
-		HandleStop:     srv.handleSessionClose,
-		BlockRegistry:  w.BlockRegistry(),
+		Log:                  srv.conf.Log,
+		MaxChunkRadius:       srv.conf.MaxChunkRadius,
+		ChunkLoadsPerTick:    srv.conf.ChunkLoadsPerTick,
+		MaxChunkTransactions: srv.conf.MaxChunkTransactions,
+		EmoteChatMuted:       srv.conf.MuteEmoteChat,
+		JoinMessage:          srv.conf.JoinMessage,
+		QuitMessage:          srv.conf.QuitMessage,
+		HandleStop:           srv.handleSessionClose,
+		BlockRegistry:        w.BlockRegistry(),
 	}.New(conn)
 
 	conf.Name = conn.IdentityData().DisplayName
@@ -639,7 +622,6 @@ func (srv *Server) parseSkin(data login.ClientData) skin.Skin {
 	playerSkin.Pix, _ = base64.StdEncoding.DecodeString(data.SkinData)
 	playerSkin.Model, _ = base64.StdEncoding.DecodeString(data.SkinGeometry)
 	playerSkin.ModelConfig, _ = skin.DecodeModelConfig(skinResourcePatch)
-	playerSkin.PlayFabID = data.PlayFabID
 	playerSkin.FullID = data.SkinID
 
 	playerSkin.Cape = skin.NewCape(data.CapeImageWidth, data.CapeImageHeight)
@@ -674,6 +656,7 @@ func vec64To32(vec3 mgl64.Vec3) mgl32.Vec3 {
 // itemEntries loads a list of all custom item entries of the server, ready to
 // be sent in the StartGame packet.
 func (srv *Server) itemEntries() []protocol.ItemEntry {
+	vanillaItems := world.VanillaItemEntries()
 	entries := make([]protocol.ItemEntry, 0, len(vanillaItems))
 
 	for name, e := range vanillaItems {
@@ -687,21 +670,4 @@ func (srv *Server) itemEntries() []protocol.ItemEntry {
 	}
 	entries = append(entries, srv.customItems...)
 	return entries
-}
-
-var (
-	//go:embed world/vanilla_items.nbt
-	vanillaItemsData []byte
-	vanillaItems     = map[string]struct {
-		RuntimeID      int32          `nbt:"runtime_id"`
-		ComponentBased bool           `nbt:"component_based"`
-		Version        int32          `nbt:"version"`
-		Data           map[string]any `nbt:"data,omitempty"`
-	}{}
-)
-
-// init reads all item entries from the resource JSON, and sets the according
-// values in the runtime ID maps.
-func init() {
-	_ = nbt.Unmarshal(vanillaItemsData, &vanillaItems)
 }

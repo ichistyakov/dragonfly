@@ -109,7 +109,7 @@ func (s Slab) LightDiffusionLevel() uint8 {
 }
 
 // CanRedstoneWireStepDown ...
-func (s Slab) CanRedstoneWireStepDown(cube.Pos, cube.Pos, *world.Tx) bool {
+func (s Slab) CanRedstoneWireStepDown(cube.Pos, cube.Pos, world.BlockSource) bool {
 	return s.Double
 }
 
@@ -169,4 +169,12 @@ func allSlabs() (b []world.Block) {
 		b = append(b, Slab{Block: s})
 	}
 	return
+}
+
+// PlacementItemCount reports the inventory items represented by this block part.
+func (s Slab) PlacementItemCount() int {
+	if s.Double {
+		return 2
+	}
+	return 1
 }

@@ -7,7 +7,6 @@ import (
 
 	"github.com/df-mc/dragonfly/server/block/cube"
 	"github.com/df-mc/dragonfly/server/world/chunk"
-	"github.com/df-mc/goleveldb/leveldb"
 )
 
 // blocksWithin implements Tx.BlocksWithin. It must only be called during a transaction.
@@ -34,10 +33,12 @@ func (w *World) blocksWithin(pos cube.Pos, radius int, blocks ...Block) iter.Seq
 				var c *chunk.Chunk
 				if col, ok := w.chunks[chunkPos]; ok {
 					c = col.Chunk
+				} else if col, ok := w.pendingColumn(chunkPos); ok {
+					c = col.Chunk
 				} else {
 					col, err := w.conf.Provider.LoadColumn(chunkPos, w.conf.Dim)
 					if err != nil {
-						if !errors.Is(err, leveldb.ErrNotFound) && !logged {
+						if !errors.Is(err, ErrColumnNotFound) && !logged {
 							// Log only the first error: a systemic provider failure would otherwise log once per chunk.
 							w.conf.Log.Error("blocks within: "+err.Error(), "X", chunkX, "Z", chunkZ)
 							logged = true
