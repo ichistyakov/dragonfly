@@ -22,6 +22,9 @@ type Item struct {
 	// Group is the name of the group that the item is part of. If two groups are registered with the same
 	// name, the item will always reside in the first group that was registered.
 	Group string
+	// GroupIndex is the index of the group in Groups() that the item is part of. It is -1 for items that
+	// should be resolved by Group name instead, for example items registered by external code.
+	GroupIndex int
 }
 
 // Group represents a group of items in the creative inventory. Each group has a category, a name and an icon.
@@ -115,11 +118,8 @@ func VanillaItems() ([]Group, []Item) {
 		panic(err)
 	}
 	groups := make([]Group, 0, len(m.Groups))
-	for i, group := range m.Groups {
+	for _, group := range m.Groups {
 		name := group.Name
-		if name == "" {
-			name = fmt.Sprint("anon", i)
-		}
 		st, _ := itemStackFromEntry(group.Icon)
 		c := Category{category(group.Category)}
 		groups = append(groups, Group{Category: c, Name: name, Icon: st})
@@ -133,7 +133,7 @@ func VanillaItems() ([]Group, []Item) {
 		if !ok {
 			continue
 		}
-		items = append(items, Item{st, groups[data.GroupIndex].Name})
+		items = append(items, Item{Stack: st, Group: groups[data.GroupIndex].Name, GroupIndex: int(data.GroupIndex)})
 	}
 	return groups, items
 }
