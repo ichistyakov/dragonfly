@@ -1133,9 +1133,19 @@ func creativeContent(br world.BlockRegistry) ([]protocol.CreativeGroup, []protoc
 
 	it := make([]protocol.CreativeItem, 0, len(creative.Items()))
 	for index, i := range creative.Items() {
-		group := slices.IndexFunc(creative.Groups(), func(group creative.Group) bool {
-			return group.Name == i.Group
-		})
+		group := -1
+		if i.GroupIndex >= 0 {
+			// Prefer the explicit catalog index: empty group names are legal and
+			// cannot be used to tell anonymous groups apart.
+			if i.GroupIndex < len(creative.Groups()) {
+				group = i.GroupIndex
+			}
+		} else {
+			// Legacy items registered without an index still resolve by name.
+			group = slices.IndexFunc(creative.Groups(), func(group creative.Group) bool {
+				return group.Name == i.Group
+			})
+		}
 		if group < 0 {
 			continue
 		}
